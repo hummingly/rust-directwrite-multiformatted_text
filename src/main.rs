@@ -44,7 +44,7 @@ impl MultiFormatsText {
 }
 
 //D2D1 SETUP
-fn create_directx_resources(app: &mut MultiFormatsText) {
+fn create_directx_resources(app: &mut MultiFormatsText, dpi_scale_x: i32, dpi_scale_y: i32) {
     unsafe {
         let mut d2_factory: *mut c_void = null_mut();
         let factory_options = D2D1_FACTORY_OPTIONS {
@@ -110,9 +110,6 @@ fn create_directx_resources(app: &mut MultiFormatsText) {
 
         let mut rect: RECT = WinStruct::default();
         GetClientRect(app.hwnd, &mut rect as *mut RECT);
-        let screen = GetDC(null_mut());
-        let dpi_scale_x = GetDeviceCaps(screen, LOGPIXELSX) / 96;
-        let dpi_scale_y = GetDeviceCaps(screen, LOGPIXELSY) / 96;
 
         let width = (rect.right / dpi_scale_x) as f32;
         let height = (rect.bottom / dpi_scale_y) as f32;
@@ -163,7 +160,7 @@ fn create_directx_resources(app: &mut MultiFormatsText) {
         }
 
         let font_feature = DWRITE_FONT_FEATURE {
-            nameTag: DWRITE_FONT_FEATURE_TAG(0x37307373),
+            nameTag: DWRITE_FONT_FEATURE_TAG(0x3730_7373),
             parameter: 1,
         };
 
@@ -224,22 +221,11 @@ fn set_d2d_resources(app: &mut MultiFormatsText) {
 }
 
 //RENDER METHOD
-fn on_paint(app: &mut MultiFormatsText) -> HRESULT {
+fn on_paint(app: &mut MultiFormatsText, dpi_scale_x: i32, dpi_scale_y: i32) -> HRESULT {
     unsafe {
         let d2d1_matrix: D2D1_MATRIX_3X2_F = WinStruct::default();
         let mut rect: RECT = WinStruct::default();
         GetClientRect(app.hwnd, &mut rect as *mut RECT);
-
-        let screen = GetDC(null_mut());
-        let dpi_scale_x = GetDeviceCaps(screen, LOGPIXELSX) / 96;
-        let dpi_scale_y = GetDeviceCaps(screen, LOGPIXELSY) / 96;
-
-        let layout_rect = D2D1_RECT_F {
-            left: (rect.left / dpi_scale_x) as f32,
-            top: (rect.top / dpi_scale_y) as f32,
-            right: ((rect.right - rect.left) / dpi_scale_x) as f32,
-            bottom: ((rect.bottom - rect.top) / dpi_scale_y) as f32,
-        };
 
         let origin = D2D1_POINT_2F {
             x: (rect.left / dpi_scale_x) as f32,
@@ -307,27 +293,52 @@ unsafe extern "system" fn wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let app_ptr = GetWindowLongPtrW(hwnd, 0);
-    let app: &mut MultiFormatsText = &mut *(app_ptr as *mut MultiFormatsText);
+    let screen = GetDC(null_mut());
+    let dpi_scale_x = GetDeviceCaps(screen, LOGPIXELSX) / 96;
+    let dpi_scale_y = GetDeviceCaps(screen, LOGPIXELSY) / 96;
+
+    let app_ptr = GetWindowLongPtrW(hwnd, 0) as *mut MultiFormatsText;
+    let mut app: &mut MultiFormatsText = &mut *(app_ptr as *mut MultiFormatsText);
     match message {
-        WM_CREATE => {
-            SetWindowLongPtrW(hwnd, 0, 0);
-            1
-        }
         WM_PAINT => {
-            set_d2d_resources(app);
-            if on_paint(app) == D2DERR_RECREATE_TARGET {
+            set_d2d_resources(&mut app);
+            if on_paint(app, dpi_scale_x, dpi_scale_y) == D2DERR_RECREATE_TARGET {
                 safe_release(app);
             }
             0
         }
         WM_SIZE => {
-            //Missing function
+            let width = GET_X_LPARAM(lparam);
+            let height = GET_Y_LPARAM(lparam);
+
+            if !app_ptr.is_null() {
+                let render_size = D2D_SIZE_U {
+                    width: width as u32,
+                    height: height as u32,
+                };
+
+                let render = &mut *app.render_target;
+                render.Resize(&render_size);
+
+                if !app.text_layout.is_null() {
+                    let text_layout = &mut *app.text_layout;
+                    text_layout.SetMaxWidth((width / dpi_scale_x) as f32);
+                    text_layout.SetMaxHeight((height / dpi_scale_y) as f32);
+                }
+            }
             0
         }
         WM_DESTROY => {
+            release_resources(&mut app);
             PostQuitMessage(0);
             1
+        }
+        WM_NCDESTROY => {
+            UnregisterClassW(
+                "directwrite_example".to_wide().as_ptr() as *const u16,
+                GetModuleHandleW(null_mut()),
+            );
+            0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
     }
@@ -336,13 +347,13 @@ unsafe extern "system" fn wndproc(
 //WINDOW CREATION
 pub fn init_class() {
     unsafe {
-        let class = "direct2d_example".to_wide();
+        let class = "directwrite_example".to_wide();
         let wndcl = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as UINT32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             cbClsExtra: 0,
-            cbWndExtra: mem::size_of::<LONG_PTR>() as INT32,
+            cbWndExtra: mem::size_of::<*mut MultiFormatsText>() as INT32,
             hInstance: GetModuleHandleW(null_mut()),
             hIcon: 0 as HICON,
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
@@ -370,8 +381,8 @@ fn create_window(app: &mut MultiFormatsText, class: &[u16], window: &[u16]) {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            600,
+            400,
             null_mut(),
             null_mut(),
             GetModuleHandleW(null_mut()),
@@ -394,19 +405,26 @@ fn set_window(app: &mut MultiFormatsText) {
     }
 }
 
+/*fn get_window(app: &mut MultiFormatsText) -> *mut MultiFormatsText {
+    let pointer = GetWindowLongPtrW(app.hwnd, 0) as *mut MultiFormatsText;
+    pointer
+}*/
+
 fn main() {
     unsafe {
         let mut app = MultiFormatsText::initialize();
-
-        let class = "direct2d_example".to_wide();
+        let class = "directwrite_example".to_wide();
         let window = "Hello World!".to_wide();
 
         init_class();
         create_window(&mut app, &class, &window);
         set_window(&mut app);
 
-        create_directx_resources(&mut app);
-        set_d2d_resources(&mut app);
+        let screen = GetDC(null_mut());
+        let dpi_scale_x = GetDeviceCaps(screen, LOGPIXELSX) / 96;
+        let dpi_scale_y = GetDeviceCaps(screen, LOGPIXELSY) / 96;
+
+        create_directx_resources(&mut app, dpi_scale_x, dpi_scale_y);
 
         let mut msg: MSG = WinStruct::default();
 
@@ -414,6 +432,5 @@ fn main() {
             TranslateMessage(&msg as *const MSG);
             DispatchMessageW(&msg as *const MSG);
         }
-        release_resources(&mut app);
     }
 }
