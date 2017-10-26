@@ -269,7 +269,7 @@ fn release_resources(app: &mut MultiFormatsText) {
     unsafe {
         safe_release(app);
 
-        if !app.dwrite_factory.is_null() {
+        if !app.d2d1_factory.is_null() {
             (*app.d2d1_factory).Release();
             app.d2d1_factory = null_mut();
         }
